@@ -45,8 +45,39 @@ std::vector<const JoyTarget*> SideTargets(const JoyBackend& backend, u8 side) {
     return result;
 }
 
+// Joy-Con pages show one left and one right device; Pro Controller pages follow with up to two each.
+struct ControllerPage {
+    const JoyTarget* first = nullptr;
+    const JoyTarget* second = nullptr;
+    unsigned firstNumber = 0;
+    unsigned secondNumber = 0;
+    bool pro = false;
+};
+
+std::vector<ControllerPage> ControllerPages(const JoyBackend& backend) {
+    const auto left = SideTargets(backend, SideLeft);
+    const auto right = SideTargets(backend, SideRight);
+    const auto pros = SideTargets(backend, SidePro);
+    std::vector<ControllerPage> pages;
+    size_t joyPages = std::max(left.size(), right.size());
+    if (!joyPages && pros.empty()) joyPages = 1;
+    for (size_t i = 0; i < joyPages; ++i) {
+        pages.push_back({i < left.size() ? left[i] : nullptr, i < right.size() ? right[i] : nullptr,
+            static_cast<unsigned>(i + 1), static_cast<unsigned>(i + 1), false});
+    }
+    for (size_t i = 0; i < pros.size(); i += 2) {
+        pages.push_back({pros[i], i + 1 < pros.size() ? pros[i + 1] : nullptr,
+            static_cast<unsigned>(i + 1), static_cast<unsigned>(i + 2), true});
+    }
+    return pages;
+}
+
 unsigned ControllerPageCount(const JoyBackend& backend) {
-    return std::max(1u, static_cast<unsigned>(std::max(SideTargets(backend, 1).size(), SideTargets(backend, 2).size())));
+    return static_cast<unsigned>(ControllerPages(backend).size());
+}
+
+bool ShowStoredColors(const JoyTarget& target) {
+    return target.colorsKnown && !target.wired && !(target.done && !target.failed && target.phase == 4);
 }
 
 constexpr float LegendCellWidth = 48;
@@ -98,9 +129,8 @@ void Button(NVGcontext* vg, float x, float y, float w, const char* key, const ch
     Text(vg, x + 54, y + 15, label, 19, ink);
 }
 
-void DrawCard(NVGcontext* vg, const JoyBackend& backend, u8 side, float x, unsigned page) {
-    const auto devices = SideTargets(backend, side);
-    const JoyTarget* target = page < devices.size() ? devices[page] : nullptr;
+// side selects the card kind (SideLeft, SideRight, SidePro); target may be null for an empty slot.
+void DrawCard(NVGcontext* vg, const JoyTarget* target, u8 side, float x, unsigned number, bool emptyPageSlot) {
     CardSummary summary;
     if (target) {
         summary.count = 1;
@@ -115,32 +145,41 @@ void DrawCard(NVGcontext* vg, const JoyBackend& backend, u8 side, float x, unsig
     const auto state = summary.state;
     const NVGcolor color = StateColor(state);
     Rectangle(vg, x, 142, 568, 350, Theme::Panel, 20);
-    const bool left = side == 1;
-    const float textX = x + (left ? 58 : 160);
-    const float iconWidth = 136.512f * 0.96f * 0.7f;
-    const float iconX = x + (left ? 568 - 32 - iconWidth : 32);
+    const bool pro = side == SidePro;
+    const bool left = side == SideLeft;
+    const float textX = x + (pro ? 200 : left ? 58 : 160);
+    const float textWidth = pro ? 340 : 350;
     const auto cardText = [&](float y, const char* text, float size, NVGcolor ink) {
-        TextBox(vg, textX, y, 350, text, size, ink, left);
+        TextBox(vg, textX, y, textWidth, text, size, ink, left);
     };
     char label[96];
-    if (target) std::snprintf(label, sizeof(label), "%s JOY-CON  #%u", side == 1 ? "LEFT" : "RIGHT", page + 1);
-    else std::snprintf(label, sizeof(label), "%s JOY-CON", side == 1 ? "LEFT" : "RIGHT");
+    const char* kind = pro ? "PRO CONTROLLER" : left ? "LEFT JOY-CON" : "RIGHT JOY-CON";
+    if (target) std::snprintf(label, sizeof(label), "%s  #%u", kind, number);
+    else std::snprintf(label, sizeof(label), "%s", kind);
     cardText(164, label, 16, Theme::Muted);
-    Circle(vg, textX + (left ? 22 : 328), 176, 5, color);
-    JoyConIcon(vg, iconX, 193, 0.96f, side == 2, summary.colorsKnown && target && !target->wired && state != CardState::Off, summary.bodyColor, summary.buttonsColor);
-    const bool emptyPageSlot = !target && ControllerPageCount(backend) > 1;
-    const char* title = emptyPageSlot ? "No device on page" : state == CardState::Attached ? "Detach first" : state == CardState::Ready ? "Ready"
+    Circle(vg, textX + (left ? 22 : textWidth - 22), 176, 5, color);
+    const bool tinted = summary.colorsKnown && target && !target->wired && state != CardState::Off;
+    if (pro) {
+        ProControllerIcon(vg, x + 24, 258, 0.8f, tinted, summary.bodyColor, summary.buttonsColor);
+    } else {
+        const float iconWidth = 136.512f * 0.96f * 0.7f;
+        const float iconX = x + (left ? 568 - 32 - iconWidth : 32);
+        JoyConIcon(vg, iconX, 193, 0.96f, side == SideRight, tinted, summary.bodyColor, summary.buttonsColor);
+    }
+    const char* title = emptyPageSlot ? "No device on page"
+        : state == CardState::Attached ? (pro ? "Unplug USB first" : "Detach first") : state == CardState::Ready ? "Ready"
         : state == CardState::Working ? "Working..." : state == CardState::Off ? "Low power"
         : state == CardState::Error ? "Needs attention" : state == CardState::Waiting ? "Connecting..." : "Not connected";
     cardText(226, title, 28, color);
     const char* note = emptyPageSlot ? "No controller on this side of this page. Use L / R to view other devices."
-        : state == CardState::Attached ? "Remove from the console rails. Detection updates automatically."
+        : state == CardState::Attached ? (pro ? "Unplug the USB cable so it connects over Bluetooth. Detection updates automatically."
+            : "Remove from the console rails. Detection updates automatically.")
         : state == CardState::Ready ? "Connected over Bluetooth. Ready for storage."
         : state == CardState::Working ? "Please wait while the controller is checked or turned off."
         : state == CardState::Off ? "Shipment low power acknowledged. Bluetooth disconnected."
         : state == CardState::Error ? "A step could not be confirmed. Open Diagnostics for the result."
         : state == CardState::Waiting ? "Waiting for an active wireless connection."
-        : "Connect a Joy-Con wirelessly. This screen updates automatically.";
+        : "Connect a Joy-Con or Pro Controller wirelessly. This screen updates automatically.";
     cardText(276, note, 20, Theme::Muted);
     if (state == CardState::Off) {
         const float checkX = textX + (left ? 335 : 15);
@@ -163,6 +202,18 @@ void DrawCard(NVGcontext* vg, const JoyBackend& backend, u8 side, float x, unsig
                 address[0], address[1], address[2], address[3], address[4], address[5]);
         } else std::snprintf(label, sizeof(label), "Pad ID %016llX", static_cast<unsigned long long>(target->padId.id));
         cardText(451, label, 14, Theme::Muted);
+    }
+}
+
+void DrawPage(NVGcontext* vg, const ControllerPage& page, unsigned pageCount) {
+    if (!page.pro) {
+        DrawCard(vg, page.first, SideLeft, 56, page.firstNumber, !page.first && pageCount > 1);
+        DrawCard(vg, page.second, SideRight, 656, page.secondNumber, !page.second && pageCount > 1);
+    } else if (page.second) {
+        DrawCard(vg, page.first, SidePro, 56, page.firstNumber, false);
+        DrawCard(vg, page.second, SidePro, 656, page.secondNumber, false);
+    } else {
+        DrawCard(vg, page.first, SidePro, 356, page.firstNumber, false);
     }
 }
 
@@ -211,34 +262,35 @@ void DrawAbout(NVGcontext* vg) {
     Text(vg, 280, 200, "Developer: sthetix", 22);
     Text(vg, 280, 238, "Version: " JOYOFF_VERSION, 22, Theme::Muted);
     TextBox(vg, 280, 294, 720,
-        "Puts original wireless Joy-Con controllers into shipment low-power mode and disconnects them for shelf storage.", 22, Theme::Foreground);
+        "Puts original wireless Joy-Con and Pro Controllers into shipment low-power mode and disconnects them for shelf storage.", 22, Theme::Foreground);
     TextBox(vg, 280, 388, 720,
-        "Saved Bluetooth pairing is cleared. Attach the controllers to a Switch to wake and pair again.", 18, Theme::Muted);
+        "Saved Bluetooth pairing is cleared. Attach Joy-Cons to a Switch, or connect Pro Controllers to it by USB, to wake and pair again.", 18, Theme::Muted);
     Text(vg, 280, 470, "github.com/sthetix/JoyOff", 18, Theme::Accent);
     Button(vg, 700, 530, 300, "B", "Close", true);
 }
 
 void DrawHome(NVGcontext* vg, const JoyBackend& backend, unsigned page) {
-    Text(vg, 56, 103, "A little rest for your Joy-Cons.", 20, Theme::Muted);
+    Text(vg, 56, 103, "A little rest for your controllers.", 20, Theme::Muted);
     Rectangle(vg, 946, 49, 278, 32, Theme::Selected, 16);
     Text(vg, 967, 55, "LOW POWER / STORAGE", 15, Theme::Accent);
-    const unsigned pages = ControllerPageCount(backend);
+    const auto controllerPages = ControllerPages(backend);
+    const unsigned pages = static_cast<unsigned>(controllerPages.size());
     page = std::min(page, pages - 1);
-    DrawCard(vg, backend, 1, 56, page);
-    DrawCard(vg, backend, 2, 656, page);
-    const auto left = Summarize(backend, 1).state;
-    const auto right = Summarize(backend, 2).state;
-    const bool error = left == CardState::Error || right == CardState::Error;
-    const bool off = (left == CardState::Off || right == CardState::Off) &&
-        (left == CardState::Off || left == CardState::Missing) &&
-        (right == CardState::Off || right == CardState::Missing);
-    const bool attached = left == CardState::Attached || right == CardState::Attached;
+    DrawPage(vg, controllerPages[page], pages);
+    const CardState states[] = {Summarize(backend, SideLeft).state, Summarize(backend, SideRight).state,
+        Summarize(backend, SidePro).state};
+    const auto anyState = [&](CardState wanted) { return std::find(std::begin(states), std::end(states), wanted) != std::end(states); };
+    const bool error = anyState(CardState::Error);
+    const bool off = anyState(CardState::Off) && std::all_of(std::begin(states), std::end(states),
+        [](CardState s) { return s == CardState::Off || s == CardState::Missing; });
+    const bool attached = anyState(CardState::Attached);
     const char* lead = backend.Running() ? "Taking care of your controllers..." : error ? "Check the controller result"
-        : backend.Ready() ? "Ready when you are" : off ? "All set for storage" : attached ? "Detach your Joy-Cons first" : "Waiting for your Joy-Cons";
-    const char* hint = backend.Running() ? "Keep the controllers detached until this operation finishes."
+        : backend.Ready() ? "Ready when you are" : off ? "All set for storage"
+        : attached ? "Detach Joy-Cons and unplug USB first" : "Waiting for your controllers";
+    const char* hint = backend.Running() ? "Keep the controllers detached and unplugged until this operation finishes."
         : error ? "Press Y for Diagnostics. You can refresh to retry detection."
         : backend.Ready() ? "Press - or tap Turn Off All, then confirm. Saved pairing will be cleared."
-        : off ? "Attach to a Switch to wake and pair again. Tap Exit when finished."
+        : off ? "Attach Joy-Cons to a Switch, or connect Pro Controllers by USB, to wake and pair again. Tap Exit when finished."
         : "Connect over Bluetooth. Detection refreshes automatically.";
     Text(vg, 56, 519, lead, 23, error ? Theme::Warning : Theme::Foreground);
     const bool hasResult = !backend.Running() && std::any_of(backend.Targets().begin(), backend.Targets().end(),
@@ -246,8 +298,6 @@ void DrawHome(NVGcontext* vg, const JoyBackend& backend, unsigned page) {
     TextBox(vg, 56, 553, 1168, hasResult ? backend.Message().c_str() : hint, 18, Theme::Muted);
     Text(vg, 56, 605, "X: Refresh", 17, backend.Running() ? Theme::Muted : Theme::Foreground);
     if (pages > 1) {
-        const auto leftDevices = SideTargets(backend, 1);
-        const auto rightDevices = SideTargets(backend, 2);
         const float start = ControllerLegendStart(pages);
         Text(vg, start - 116, 602, "Controllers", 16, Theme::Muted);
         for (unsigned i = 0; i < pages; ++i) {
@@ -261,12 +311,20 @@ void DrawHome(NVGcontext* vg, const JoyBackend& backend, unsigned page) {
                 nvgStrokeWidth(vg, 1.5f);
                 nvgStroke(vg);
             }
-            const JoyTarget* leftDevice = i < leftDevices.size() ? leftDevices[i] : nullptr;
-            const JoyTarget* rightDevice = i < rightDevices.size() ? rightDevices[i] : nullptr;
-            if (leftDevice) JoyConIcon(vg, x + 11, 593, 0.095f, false,
-                leftDevice->colorsKnown && !leftDevice->wired && !(leftDevice->done && !leftDevice->failed && leftDevice->phase == 4), leftDevice->bodyColor, leftDevice->buttonsColor);
-            if (rightDevice) JoyConIcon(vg, x + 27, 593, 0.095f, true,
-                rightDevice->colorsKnown && !rightDevice->wired && !(rightDevice->done && !rightDevice->failed && rightDevice->phase == 4), rightDevice->bodyColor, rightDevice->buttonsColor);
+            const auto& entry = controllerPages[i];
+            if (entry.pro) {
+                const auto mini = [&](const JoyTarget* device, float offset) {
+                    if (device) ProControllerIcon(vg, x + offset, 598, 0.095f, ShowStoredColors(*device),
+                        device->bodyColor, device->buttonsColor);
+                };
+                if (entry.second) { mini(entry.first, 4); mini(entry.second, 25); }
+                else mini(entry.first, 14.5f);
+            } else {
+                if (entry.first) JoyConIcon(vg, x + 11, 593, 0.095f, false, ShowStoredColors(*entry.first),
+                    entry.first->bodyColor, entry.first->buttonsColor);
+                if (entry.second) JoyConIcon(vg, x + 27, 593, 0.095f, true, ShowStoredColors(*entry.second),
+                    entry.second->bodyColor, entry.second->buttonsColor);
+            }
             char number[16];
             std::snprintf(number, sizeof(number), "%u", i + 1);
             Text(vg, x + 20, 621, number, 10, i == page ? Theme::Accent : Theme::Muted);
@@ -288,10 +346,11 @@ void DrawConfirmation(NVGcontext* vg, const JoyBackend& backend) {
     Rectangle(vg, 0, 0, Width, Height, nvgRGBA(0, 0, 0, 210), 0);
     Rectangle(vg, 160, 170, 960, 380, Theme::Panel, 22);
     char title[96];
-    std::snprintf(title, sizeof(title), "Turn off all %u ready wireless Joy-Cons?", ReadyCount(backend));
+    const unsigned ready = ReadyCount(backend);
+    std::snprintf(title, sizeof(title), "Turn off %u ready wireless controller%s?", ready, ready == 1 ? "" : "s");
     Text(vg, 200, 205, title, 28, Theme::Accent);
     Text(vg, 200, 267, "Saved Bluetooth pairing will be cleared.", 22, Theme::Warning);
-    TextBox(vg, 200, 310, 865, "The ready controllers will enter shipment low power mode and disconnect. Attach them to a Switch to wake and pair again.", 21, Theme::Foreground);
+    TextBox(vg, 200, 310, 865, "They will enter shipment low power mode and disconnect. To wake them, attach Joy-Cons to a Switch or connect Pro Controllers to it by USB.", 21, Theme::Foreground);
     Text(vg, 200, 397, "Includes ready controllers on every page. Touch remains available.", 18, Theme::Muted);
     Button(vg, 200, 450, 400, "B", "Cancel", true);
     Button(vg, 640, 450, 440, "-", "Confirm Turn Off", true, true);
@@ -407,7 +466,8 @@ struct ColorEditor {
     bool CanApply(const JoyBackend& backend) const {
         if (backend.Running() || target >= backend.Targets().size()) return false;
         const auto& device = backend.Targets()[target];
-        return !device.wired && !device.failed && !device.done && device.phase == 0 && device.side;
+        return !device.wired && !device.failed && !device.done && device.phase == 0 &&
+            (device.side == SideLeft || device.side == SideRight);
     }
 };
 
@@ -418,11 +478,14 @@ void DrawColors(NVGcontext* vg, const JoyBackend& backend, const ColorEditor& ed
     char label[128];
     if (device) std::snprintf(label, sizeof(label), "L / R: Controller %u of %u - %s",
         static_cast<unsigned>(editor.target + 1), static_cast<unsigned>(backend.Targets().size()), device->name.c_str());
-    else std::snprintf(label, sizeof(label), "No Joy-Con detected. Connect and Refresh.");
+    else std::snprintf(label, sizeof(label), "No controller detected. Connect and Refresh.");
     Text(vg, 86, 136, label, 23, Theme::Accent);
-    Text(vg, 86, 174, device && device->wired ? "Attached: detach and connect over Bluetooth, then Refresh."
+    const bool pro = device && device->side == SidePro;
+    Text(vg, 86, 174, pro ? "Pro Controller colors are shown read-only. Color editing supports Joy-Con only."
+        : device && device->wired ? "Attached: detach and connect over Bluetooth, then Refresh."
         : "Apply requires a verified wireless Joy-Con. Keep it connected until verification finishes.", 18, Theme::Muted);
-    JoyConIcon(vg, 155, 225, 0.85f, device && device->side == 2, true, editor.Body(), editor.Buttons());
+    if (pro) ProControllerIcon(vg, 120, 222, 1.8f, true, editor.Body(), editor.Buttons());
+    else JoyConIcon(vg, 155, 225, 0.85f, device && device->side == SideRight, true, editor.Body(), editor.Buttons());
     char hex[80];
     std::snprintf(hex, sizeof(hex), "Body #%02X%02X%02X   Buttons #%02X%02X%02X",
         editor.rgb[0], editor.rgb[1], editor.rgb[2], editor.rgb[3], editor.rgb[4], editor.rgb[5]);
@@ -474,7 +537,7 @@ void DrawColors(NVGcontext* vg, const JoyBackend& backend, const ColorEditor& ed
             nvgScissor(vg, 200, 250, 745, 52);
             TextBox(vg, 200, 250, 745, editor.restorePath.c_str(), 16, Theme::Muted);
             nvgRestore(vg);
-            JoyConIcon(vg, 1000, 260, 0.35f, device && device->side == 2, true, editor.Body(), editor.Buttons());
+            JoyConIcon(vg, 1000, 260, 0.35f, device && device->side == SideRight, true, editor.Body(), editor.Buttons());
         }
         TextBox(vg, 200, editor.restore ? 313 : 267, editor.restore ? 745 : 865, editor.restore
             ? "The preview shows the selected backup. Current colors will be backed up before restoring."

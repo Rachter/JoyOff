@@ -4,11 +4,21 @@
 #include <string>
 #include <vector>
 
+// Controller kinds use the Device Info (subcommand 02) type byte.
+constexpr u8 SideLeft = 1;
+constexpr u8 SideRight = 2;
+constexpr u8 SidePro = 3;
+
+inline const char* ControllerName(u8 side) {
+    return side == SideLeft ? "Joy-Con (L)" : side == SideRight ? "Joy-Con (R)"
+        : side == SidePro ? "Pro Controller" : "Controller";
+}
+
 struct JoyTarget {
     HidsysUniquePadId padId{};
     BtdrvAddress address{};
     std::string name;
-    u8 side = 0;
+    u8 side = 0; // SideLeft, SideRight, or SidePro.
     bool wired = false;
     bool colorsKnown = false;
     u32 bodyColor = 0;
@@ -22,6 +32,10 @@ struct JoyTarget {
     bool attempted = false;
     u64 sentTick = 0;
     u64 deadline = 0;
+    // Pro Controllers get a short pause between acknowledged commands.
+    u8 queuedCommand = 0;
+    u8 queuedArgument = 0;
+    u64 queuedAt = 0;
 };
 
 class JoyBackend {
@@ -34,7 +48,7 @@ class JoyBackend {
     bool colorBackupOnly = false;
     size_t colorTarget = 0;
     std::array<u8, 6> requestedColors{};
-    std::string colorMessage = "Select a wireless Joy-Con. Colors are saved permanently to the controller.";
+    std::string colorMessage = "Select a wireless Joy-Con. Colors are saved permanently to the controller. Pro Controller colors are read-only.";
     std::string colorBackup;
     SharedMemory memory{};
     bool mapped = false;
@@ -56,6 +70,7 @@ class JoyBackend {
     bool ReadConnections(std::string& snapshot);
     bool Observe();
     bool Send(JoyTarget& target, u8 command, u8 argument);
+    void SendNext(JoyTarget& target, u8 command, u8 argument);
     void Receive();
     void Response(const BtdrvHidReportEventInfo& event, size_t size, u64 tick);
     void Fail(JoyTarget& target, const char* text, Result rc = 0);

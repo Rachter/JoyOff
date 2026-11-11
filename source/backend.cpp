@@ -10,6 +10,8 @@
 namespace {
 constexpr u64 timeoutNs = 2000000000ULL;
 constexpr u64 disconnectTimeoutNs = 5000000000ULL;
+// joycon-turnoff observed Pro Controllers dropping back-to-back subcommands; pause after each ACK.
+constexpr u64 proCommandGapNs = 100000000ULL;
 u64 Now() { return armTicksToNs(armGetSystemTick()); }
 bool SameAddress(const BtdrvAddress& a, const BtdrvAddress& b) {
     return std::memcmp(&a, &b, sizeof(a)) == 0;
@@ -34,8 +36,9 @@ bool ReadTransport(HidsysUniquePadId padId, u8 side, bool& connected, bool& wire
             [&](const HidsysUniquePadId& value) { return value.id == padId.id; })) continue;
         const auto read = [&](const HidNpadCommonState& state, bool split) {
             const u32 attributes = state.attributes;
-            const u32 connectedBit = side == 1 ? HidNpadAttribute_IsLeftConnected : HidNpadAttribute_IsRightConnected;
-            const u32 wiredBit = side == 1 ? HidNpadAttribute_IsLeftWired : HidNpadAttribute_IsRightWired;
+            const u32 connectedBit = side == SideLeft ? HidNpadAttribute_IsLeftConnected : HidNpadAttribute_IsRightConnected;
+            const u32 wiredBit = side == SidePro ? HidNpadAttribute_IsWired
+                : side == SideLeft ? HidNpadAttribute_IsLeftWired : HidNpadAttribute_IsRightWired;
             if (split ? (attributes & connectedBit) != 0 : (attributes & HidNpadAttribute_IsConnected) != 0) {
                 connected = true;
                 wired = wired || (attributes & (wiredBit | HidNpadAttribute_IsWired)) != 0;
@@ -44,10 +47,15 @@ bool ReadTransport(HidsysUniquePadId padId, u8 side, bool& connected, bool& wire
                 static_cast<unsigned long long>(padId.id), static_cast<unsigned>(side), attributes, connected, wired);
         };
         HidNpadCommonState state{};
+        if (side == SidePro) {
+            // Only the FullKey style is a Pro Controller; NSO/GameCube styles never become candidates.
+            if ((styles & HidNpadStyleTag_NpadFullKey) && hidGetNpadStatesFullKey(id, &state, 1)) read(state, false);
+            continue;
+        }
         if ((styles & HidNpadStyleTag_NpadHandheld) && hidGetNpadStatesHandheld(id, &state, 1)) read(state, true);
         if ((styles & HidNpadStyleTag_NpadJoyDual) && hidGetNpadStatesJoyDual(id, &state, 1)) read(state, true);
-        if (side == 1 && (styles & HidNpadStyleTag_NpadJoyLeft) && hidGetNpadStatesJoyLeft(id, &state, 1)) read(state, false);
-        if (side == 2 && (styles & HidNpadStyleTag_NpadJoyRight) && hidGetNpadStatesJoyRight(id, &state, 1)) read(state, false);
+        if (side == SideLeft && (styles & HidNpadStyleTag_NpadJoyLeft) && hidGetNpadStatesJoyLeft(id, &state, 1)) read(state, false);
+        if (side == SideRight && (styles & HidNpadStyleTag_NpadJoyRight) && hidGetNpadStatesJoyRight(id, &state, 1)) read(state, false);
     }
     return connected || !queryFailed;
 }
@@ -64,12 +72,15 @@ void ReadColors(JoyTarget& target) {
             [&](const HidsysUniquePadId& pad) { return pad.id == target.padId.id; })) continue;
         HidNpadControllerColor color{};
         Result rc;
-        if (styles & (HidNpadStyleTag_NpadHandheld | HidNpadStyleTag_NpadJoyDual)) {
+        if (target.side == SidePro) {
+            if (!(styles & HidNpadStyleTag_NpadFullKey)) continue;
+            rc = hidGetNpadControllerColorSingle(id, &color);
+        } else if (styles & (HidNpadStyleTag_NpadHandheld | HidNpadStyleTag_NpadJoyDual)) {
             HidNpadControllerColor left{}, right{};
             rc = hidGetNpadControllerColorSplit(id, &left, &right);
-            if (R_SUCCEEDED(rc)) color = target.side == 1 ? left : right;
-        } else if ((target.side == 1 && (styles & HidNpadStyleTag_NpadJoyLeft)) ||
-                   (target.side == 2 && (styles & HidNpadStyleTag_NpadJoyRight))) {
+            if (R_SUCCEEDED(rc)) color = target.side == SideLeft ? left : right;
+        } else if ((target.side == SideLeft && (styles & HidNpadStyleTag_NpadJoyLeft)) ||
+                   (target.side == SideRight && (styles & HidNpadStyleTag_NpadJoyRight))) {
             rc = hidGetNpadControllerColorSingle(id, &color);
         } else continue;
         DebugLog("HID colors pad=%016llX slot=%u side=%u rc=0x%08X body_rgba=%08X buttons_rgba=%08X",
@@ -201,24 +212,32 @@ void JoyBackend::Refresh() {
             DebugLog("HID index=%d skipped: cannot read controller type", i);
             continue;
         }
-        if (type != HidsysUniquePadType_LeftController && type != HidsysUniquePadType_RightController) {
-            DebugLog("HID index=%d skipped: not a left/right controller", i);
+        const u8 side = type == HidsysUniquePadType_LeftController ? SideLeft
+            : type == HidsysUniquePadType_RightController ? SideRight
+            : type == HidsysUniquePadType_FullKeyController ? SidePro : 0;
+        if (!side) {
+            DebugLog("HID index=%d skipped: not a Joy-Con L/R or Pro Controller", i);
             continue;
         }
-        const u8 side = type == HidsysUniquePadType_LeftController ? 1 : 2;
         bool connectedNow = false, wiredNow = false;
         const bool transportKnown = ReadTransport(pads[i], side, connectedNow, wiredNow, true);
-        DebugLog("HID index=%d active_transport_known=%d connected=%d wired=%d metadata_interface=%u",
-            i, transportKnown, connectedNow, wiredNow, static_cast<unsigned>(interfaceType));
+        DebugLog("HID index=%d side=%u active_transport_known=%d connected=%d wired=%d metadata_interface=%u",
+            i, static_cast<unsigned>(side), transportKnown, connectedNow, wiredNow, static_cast<unsigned>(interfaceType));
+        if (side == SidePro && !connectedNow) {
+            // FullKey pads without an active FullKey Npad (NSO, GameCube, ...) are not Pro Controllers.
+            DebugLog("HID index=%d skipped: FullKey pad has no active Pro Controller (FullKey) state", i);
+            continue;
+        }
         if (!transportKnown || !connectedNow || wiredNow) {
             JoyTarget target;
             target.padId = pads[i];
             target.side = side;
             target.wired = wiredNow;
-            target.name = side == 1 ? "Joy-Con (L)" : "Joy-Con (R)";
+            target.name = ControllerName(side);
             target.done = true;
-            target.status = target.wired ? "Attached to tablet. Detach to turn off."
-                : "Waiting for an active Bluetooth connection...";
+            target.status = !target.wired ? "Waiting for an active Bluetooth connection..."
+                : side == SidePro ? "USB connected. Unplug the cable to turn off."
+                : "Attached to tablet. Detach to turn off.";
             targets.push_back(target);
             continue;
         }
@@ -242,29 +261,33 @@ void JoyBackend::Refresh() {
         JoyTarget target;
         target.padId = pads[i];
         target.address = address;
-        target.side = type == HidsysUniquePadType_LeftController ? 1 : 2;
-        target.name = target.side == 1 ? "Joy-Con (L)" : "Joy-Con (R)";
+        target.side = side;
+        target.name = ControllerName(side);
         target.status = "Checking controller identity...";
         ReadColors(target);
         targets.push_back(target);
     }
     const auto wirelessCount = std::count_if(targets.begin(), targets.end(), [](const JoyTarget& t) { return !t.done; });
-    diagnostics = "HID pads: " + std::to_string(padCount) + "; active wireless L/R: " + std::to_string(wirelessCount) +
+    const auto wirelessPro = std::count_if(targets.begin(), targets.end(), [](const JoyTarget& t) {
+        return !t.done && t.side == SidePro;
+    });
+    diagnostics = "HID pads: " + std::to_string(padCount) + "; active wireless L/R: " + std::to_string(wirelessCount - wirelessPro) +
+        "; Pro: " + std::to_string(wirelessPro) +
         "; BTM comparison: " + (R_SUCCEEDED(rc) ? std::to_string(visibleCount) : "unavailable");
     DebugLog("Detection: %s", diagnostics.c_str());
     if (targets.empty()) {
-        message = "No Bluetooth L/R controllers reported by HID. Detach Joy-Cons and Refresh; see /joyoff-debug.txt.";
+        message = "No Bluetooth Joy-Con or Pro Controller reported by HID. Connect wirelessly and Refresh; see /joyoff-debug.txt.";
         DebugLog("Detection stopped: %s", message.c_str());
         return;
     }
     if (!wirelessCount) {
-        message = "Detach Joy-Cons and connect wirelessly. The list refreshes automatically; touch controls remain available.";
+        message = "Detach Joy-Cons or unplug Pro Controllers and connect wirelessly. The list refreshes automatically; touch controls remain available.";
         DebugLog("Waiting: %s", message.c_str());
         return;
     }
     if (!Observe()) return;
     identifying = running = true;
-    message = "Identifying Joy-Con L/R. Only Device Info requests are sent during detection.";
+    message = "Identifying controllers. Only Device Info requests are sent during detection.";
     for (auto& target : targets) {
         if (target.done) continue;
         target.counter = static_cast<u8>(armGetSystemTick() & 0x0f);
@@ -293,9 +316,12 @@ bool JoyBackend::ReadConnections(std::string& snapshot) {
         const Result interfaceResult = hidsysGetUniquePadInterface(pads[i], &interfaceType);
         current += std::to_string(pads[i].id) + ":" + std::to_string(static_cast<unsigned>(type)) +
             ":" + std::to_string(interfaceResult) + ":" + std::to_string(static_cast<unsigned>(interfaceType)) + ";";
-        if (type == HidsysUniquePadType_LeftController || type == HidsysUniquePadType_RightController) {
+        const u8 side = type == HidsysUniquePadType_LeftController ? SideLeft
+            : type == HidsysUniquePadType_RightController ? SideRight
+            : type == HidsysUniquePadType_FullKeyController ? SidePro : 0;
+        if (side) {
             bool connected = false, wired = false;
-            if (!ReadTransport(pads[i], type == HidsysUniquePadType_LeftController ? 1 : 2, connected, wired)) return false;
+            if (!ReadTransport(pads[i], side, connected, wired)) return false;
             current += connected ? "connected:" : "disconnected:";
             current += wired ? "wired;" : "wireless;";
         }
@@ -322,12 +348,12 @@ void JoyBackend::AutoRefresh(bool paused) {
 void JoyBackend::ExplainUnavailable() {
     if (running) message = identifying ? "Checking controller identity. Wait for detection to finish."
         : "Turn Off is already running. Wait for the per-controller results.";
-    else if (targets.empty()) message = "No wireless Joy-Con ready. Detach and connect them; detection refreshes automatically.";
+    else if (targets.empty()) message = "No wireless controller ready. Connect Joy-Cons or Pro Controllers wirelessly; detection refreshes automatically.";
     else {
         const auto failed = std::find_if(targets.begin(), targets.end(), [](const JoyTarget& t) { return t.failed; });
         message = failed != targets.end() ? failed->name + ": " + failed->status + " Press X / Refresh to retry detection."
             : std::any_of(targets.begin(), targets.end(), [](const JoyTarget& t) { return t.wired; })
-                ? "Detach Joy-Cons from the tablet first. Wait for Bluetooth connection and automatic detection."
+                ? "Detach Joy-Cons from the tablet and unplug Pro Controller USB cables first. Wait for Bluetooth connection and automatic detection."
                 : "No controller ready. Connect wirelessly; press X / Refresh to retry detection.";
     }
     DebugLog("Minus unavailable: %s", message.c_str());
@@ -394,6 +420,14 @@ bool JoyBackend::Send(JoyTarget& target, u8 command, u8 argument) {
     return true;
 }
 
+void JoyBackend::SendNext(JoyTarget& target, u8 command, u8 argument) {
+    if (target.side != SidePro) { Send(target, command, argument); return; }
+    // Update() sends it once the gap has elapsed; timeouts start from the actual send.
+    target.queuedCommand = command;
+    target.queuedArgument = argument;
+    target.queuedAt = Now() + proCommandGapNs;
+}
+
 void JoyBackend::Start() {
     DebugLog("Turn Off requested: ready=%d candidates=%zu", Ready(), targets.size());
     if (!Ready()) { ExplainUnavailable(); return; }
@@ -411,7 +445,7 @@ void JoyBackend::Start() {
     if (!Observe()) return;
     identifying = false;
     running = true;
-    message = "Working. Keep the Joy-Cons detached. Results appear below.";
+    message = "Working. Keep the controllers detached and unplugged. Results appear below.";
     for (auto& target : targets) {
         target.attempted = false;
         if (target.failed || target.done || !target.side || target.phase != 0) continue;
@@ -419,6 +453,7 @@ void JoyBackend::Start() {
         target.failed = target.done = false;
         target.counter = static_cast<u8>(armGetSystemTick() & 0x0f);
         target.identityRetries = 0;
+        target.queuedCommand = 0;
         target.phase = 1;
         target.status = "Checking controller identity...";
         Send(target, 0x02, 0);
@@ -477,6 +512,10 @@ void JoyBackend::BeginColors(HidsysUniquePadId padId, u32 body, u32 buttons, boo
     });
     if (found == targets.end() || found->failed || found->done || found->wired || found->phase != 0) {
         colorMessage = "No verified wireless Joy-Con selected. Detach, connect and Refresh first.";
+        return;
+    }
+    if (found->side != SideLeft && found->side != SideRight) {
+        colorMessage = "Color editing supports Joy-Con only. Pro Controller colors are shown read-only.";
         return;
     }
     if (!Observe()) { colorMessage = message; return; }
@@ -644,7 +683,7 @@ void JoyBackend::Response(const BtdrvHidReportEventInfo& event, size_t size, u64
         return;
     }
     for (auto& target : targets) {
-        if (target.done || !SameAddress(target.address, data.addr) || tick < target.sentTick ||
+        if (target.done || target.queuedCommand || !SameAddress(target.address, data.addr) || tick < target.sentTick ||
             reply[14] != Expected(target.phase)) continue;
         const auto* address = reinterpret_cast<const u8*>(&data.addr);
         DebugLog("ACK address=%02X:%02X:%02X:%02X:%02X:%02X phase=%d subcmd=%02X ack=%02X",
@@ -655,14 +694,19 @@ void JoyBackend::Response(const BtdrvHidReportEventInfo& event, size_t size, u64
             continue;
         }
         if (target.phase == 1) {
-            if (data.report.size < 25 || (reply[17] != 1 && reply[17] != 2) ||
+            // Device Info type byte: 1 = Joy-Con (L), 2 = Joy-Con (R), 3 = Pro Controller.
+            // It must also match the type HID reported, so a FullKey pad must answer 3.
+            if (data.report.size < 25 || (reply[17] != SideLeft && reply[17] != SideRight && reply[17] != SidePro) ||
                 (target.side && reply[17] != target.side)) {
+                DebugLog("Identity mismatch: expected type=%u reported type=%02X",
+                    static_cast<unsigned>(target.side), data.report.size >= 25 ? reply[17] : 0);
                 Fail(target, "Identity mismatch; no changes sent.");
                 continue;
             }
             target.side = reply[17];
-            target.name = target.side == 1 ? "Joy-Con (L)" : "Joy-Con (R)";
-            DebugLog("Identity verified: %s type=%u", target.name.c_str(), static_cast<unsigned>(target.side));
+            target.name = ControllerName(target.side);
+            DebugLog("Identity verified: %s type=%u firmware=%02X.%02X", target.name.c_str(),
+                static_cast<unsigned>(target.side), reply[15], reply[16]);
             if (identifying && !target.colorsKnown) ReadColors(target);
             if (identifying) {
                 target.phase = 0;
@@ -671,11 +715,11 @@ void JoyBackend::Response(const BtdrvHidReportEventInfo& event, size_t size, u64
             }
             target.phase = 2;
             target.status = "Clearing saved pairing...";
-            Send(target, 0x07, 0);
+            SendNext(target, 0x07, 0);
         } else if (target.phase == 2) {
             target.phase = 3;
             target.status = "Pairing cleared. Setting low power...";
-            Send(target, 0x08, 1);
+            SendNext(target, 0x08, 1);
         } else if (target.phase == 3) {
             if (data.report.size < 16 || reply[15] != 0) {
                 Fail(target, "Pairing cleared; low power rejected/unconfirmed.");
@@ -683,7 +727,7 @@ void JoyBackend::Response(const BtdrvHidReportEventInfo& event, size_t size, u64
             }
             target.phase = 4;
             target.status = "Low power acknowledged. Disconnecting...";
-            Send(target, 0x06, 0);
+            SendNext(target, 0x06, 0);
         }
     }
 }
@@ -743,6 +787,21 @@ void JoyBackend::Update() {
     bool checkConnections = false;
     for (auto& target : targets) {
         if (target.done || target.phase == 0) continue;
+        if (target.queuedCommand) {
+            if (Now() < target.queuedAt) continue;
+            bool connected = false, wired = false;
+            if (!ReadTransport(target.padId, target.side, connected, wired) || !connected || wired) {
+                Fail(target, target.phase == 2 ? "Wireless connection changed before pairing reset; no changes sent."
+                    : target.phase == 3 ? "Pairing cleared; wireless connection lost before low power."
+                    : "Low power set; wireless connection lost before disconnect.");
+                target.queuedCommand = 0;
+                continue;
+            }
+            const u8 command = target.queuedCommand, argument = target.queuedArgument;
+            target.queuedCommand = 0;
+            Send(target, command, argument);
+            continue;
+        }
         if (target.phase == 4) checkConnections = true;
         else if (Now() >= target.deadline) {
             if (target.phase == 1 && target.identityRetries < 2) {
@@ -768,7 +827,7 @@ void JoyBackend::Update() {
         s32 count = 0;
         const Result rc = hidsysGetUniquePadIds(connected, 32, &count);
         for (auto& target : targets) {
-            if (target.done || target.phase != 4) continue;
+            if (target.done || target.phase != 4 || target.queuedCommand) continue;
             bool present = true;
             Result checkResult = rc;
             if (R_SUCCEEDED(rc)) {
@@ -797,7 +856,7 @@ void JoyBackend::Update() {
         if (identifying) {
             identifying = false;
             message = Ready() ? "Ready. Turn Off All clears pairing and enables shipment low power mode."
-                : "No Joy-Con identity verified. See each device result; no pairing changes were sent.";
+                : "No controller identity verified. See each device result; no pairing changes were sent.";
         } else {
             unsigned succeeded = 0, failed = 0, skipped = 0;
             for (const auto& target : targets) {

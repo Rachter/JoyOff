@@ -119,3 +119,98 @@ void JoyConIcon(NVGcontext* vg, float x, float y, float scale, bool right,
     }
     nvgRestore(vg);
 }
+
+// Simplified front view of a Pro Controller, drawn for JoyOff in a 200 x 140 unit box.
+constexpr float ProIconWidth = 200, ProIconHeight = 140;
+
+void ProControllerOutline(NVGcontext* vg) {
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, 60, 8);
+    nvgLineTo(vg, 140, 8);
+    nvgBezierTo(vg, 170, 8, 188, 18, 194, 44);
+    nvgBezierTo(vg, 200, 72, 200, 110, 190, 128);
+    nvgBezierTo(vg, 182, 142, 160, 142, 152, 128);
+    nvgBezierTo(vg, 144, 114, 136, 100, 120, 100);
+    nvgLineTo(vg, 80, 100);
+    nvgBezierTo(vg, 64, 100, 56, 114, 48, 128);
+    nvgBezierTo(vg, 40, 142, 18, 142, 10, 128);
+    nvgBezierTo(vg, 0, 110, 0, 72, 6, 44);
+    nvgBezierTo(vg, 12, 18, 30, 8, 60, 8);
+    nvgClosePath(vg);
+}
+
+void ProControllerIcon(NVGcontext* vg, float x, float y, float scale,
+    bool colorsKnown, u32 bodyColor, u32 buttonsColor) {
+    nvgSave(vg);
+    nvgTranslate(vg, x, y);
+    nvgScale(vg, scale, scale);
+    const NVGcolor body = colorsKnown ? ControllerColor(bodyColor) : nvgRGB(76, 88, 96);
+    const NVGcolor controls = colorsKnown ? ControllerColor(buttonsColor) : nvgRGB(40, 45, 50);
+    const NVGcolor legend = (controls.r * 0.299f + controls.g * 0.587f + controls.b * 0.114f) > 0.55f
+        ? nvgRGB(25, 29, 32) : nvgRGB(211, 216, 219);
+    // Shoulder buttons along the top edge.
+    for (int side = 0; side < 2; ++side) {
+        nvgSave(vg);
+        if (side) { nvgTranslate(vg, ProIconWidth, 0); nvgScale(vg, -1, 1); }
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, 10, 34);
+        nvgBezierTo(vg, 18, 12, 36, 4, 66, 4);
+        nvgStrokeColor(vg, nvgLerpRGBA(body, nvgRGB(0, 0, 0), 0.35f));
+        nvgStrokeWidth(vg, 7);
+        nvgLineCap(vg, NVG_ROUND);
+        nvgStroke(vg);
+        nvgRestore(vg);
+    }
+    nvgSave(vg);
+    nvgTranslate(vg, 2, 4);
+    ProControllerOutline(vg);
+    nvgFillColor(vg, nvgRGBA(0, 0, 0, 50));
+    nvgFill(vg);
+    nvgRestore(vg);
+    ProControllerOutline(vg);
+    nvgFillColor(vg, body);
+    nvgFill(vg);
+    nvgStrokeColor(vg, nvgRGBA(235, 240, 242, 80));
+    nvgStrokeWidth(vg, 1.4f);
+    nvgStroke(vg);
+
+    const auto stick = [&](float cx, float cy) {
+        Circle(vg, cx, cy, 15, controls);
+        Circle(vg, cx, cy, 11.5f, nvgLerpRGBA(controls, nvgRGB(255, 255, 255), 0.07f));
+        nvgBeginPath(vg);
+        nvgCircle(vg, cx, cy, 11.5f);
+        nvgStrokeColor(vg, nvgLerpRGBA(controls, nvgRGB(255, 255, 255), 0.28f));
+        nvgStrokeWidth(vg, 1.2f);
+        nvgStroke(vg);
+    };
+    stick(50, 48);
+    stick(124, 78);
+
+    // D-pad.
+    Rectangle(vg, 65, 74.5f, 26, 9, controls, 2);
+    Rectangle(vg, 73.5f, 66, 9, 26, controls, 2);
+
+    // A/B/X/Y.
+    const float bx = 150, by = 48, spacing = 13;
+    const float px[] = {bx, bx + spacing, bx, bx - spacing};
+    const float py[] = {by - spacing, by, by + spacing, by};
+    const char* letters[] = {"X", "A", "B", "Y"};
+    for (int i = 0; i < 4; ++i) {
+        Circle(vg, px[i], py[i], 7, controls);
+        nvgFontFace(vg, "switch-standard");
+        nvgFontSize(vg, 8);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor(vg, legend);
+        nvgText(vg, px[i], py[i] + 0.5f, letters[i], nullptr);
+    }
+
+    // Minus / Plus, Capture / Home.
+    Line(vg, 80, 28, 88, 28, controls, 3);
+    Line(vg, 112, 28, 120, 28, controls, 3);
+    Line(vg, 116, 24, 116, 32, controls, 3);
+    Rectangle(vg, 86, 40, 9, 9, controls, 2);
+    Circle(vg, 90.5f, 44.5f, 2.6f, legend);
+    Circle(vg, 109.5f, 44.5f, 5.5f, nvgLerpRGBA(controls, legend, 0.35f));
+    Circle(vg, 109.5f, 44.5f, 4.2f, controls);
+    nvgRestore(vg);
+}

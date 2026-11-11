@@ -1,6 +1,6 @@
 # JoyOff for Nintendo Switch
 
-A homebrew application for original Joy-Con L/R connected over Bluetooth. Requires CFW, firmware 13.0.0 or newer, and access to the `hid:sys` and `btdrv` services. BTM access is optional for diagnostic comparisons. Use title override/full application mode for the graphical interface. MissionControl is not required.
+A homebrew application for original Joy-Con L/R and Pro Controllers connected over Bluetooth. Requires CFW, firmware 13.0.0 or newer, and access to the `hid:sys` and `btdrv` services. BTM access is optional for diagnostic comparisons. Use title override/full application mode for the graphical interface. MissionControl is not required.
 
 ## Usage
 
@@ -31,7 +31,18 @@ The app sends an identity request (`02`), resets saved pairing (`07`), enables s
 
 Only a missing Device Info (`02`) acknowledgement is automatically retried, at most twice with the existing two-second timeout per attempt. The current wireless input connection is checked before a retry. Send failures, rejected commands, and identity mismatches stop immediately. Pairing reset (`07`), shipment mode (`08`), and disconnect (`06`) are never automatically retried. The completed Turn Off result reports succeeded, failed, and skipped devices across all pages. Devices excluded before the operation, such as attached or identity-failed controllers, count as skipped.
 
-Attach the Joy-Cons to a Switch to wake and pair again. Controllers still on the rails, Pro Controllers, Joy-Con 2, and third-party/emulated controllers are outside scope. Identity and device-type checks reduce accidental targeting but cannot authenticate a controller against clones or emulation.
+Attach the Joy-Cons to a Switch, or connect Pro Controllers to a Switch or dock by USB, to wake and pair again. Controllers still on the rails, USB-wired Pro Controllers, Joy-Con 2, Switch 2 Pro Controllers, NSO controllers, and third-party/emulated controllers are outside scope. Identity and device-type checks reduce accidental targeting but cannot authenticate a controller against clones or emulation.
+
+## Pro Controller support
+
+Pro Controllers are discovered alongside Joy-Cons. `JoyTarget::side` holds the Device Info type byte: `1` Joy-Con (L), `2` Joy-Con (R), `3` Pro Controller.
+
+- **Discovery.** A unique pad of type `HidsysUniquePadType_FullKeyController` becomes a candidate only when one of its Npad slots has the `NpadFullKey` style, an `IsConnected` attribute, and no `IsWired` attribute. FullKey pads without an active FullKey state (NSO SNES/N64/Genesis, GameCube-style, and similar) are skipped and logged. A USB-wired Pro Controller is shown as attached ("Unplug USB first") and is never sent commands.
+- **Identity.** The Device Info reply must report type `03`, matching the HID type. A Joy-Con slot answering `03`, or a FullKey pad answering anything else, fails with "Identity mismatch; no changes sent."
+- **Pacing.** After each acknowledged step (`02` → `07` → `08 01` → `06 00`), the next Pro Controller command is queued and sent 100 ms later, and the wireless connection is checked again before it is sent. Timeouts start from the actual send, so the queue never counts as a missing ACK. Joy-Con commands are still sent immediately after each acknowledgement. The pause follows joycon-turnoff, whose Pro Controller fix added a 100 ms gap between commands.
+- **Colors.** Pro Controller body/button colors come from `hidGetNpadControllerColorSingle` and are shown on the cards and in the Colors screen, read-only. `BeginColors` refuses non-Joy-Con targets, so no SPI reads or writes are sent to Pro Controllers. Grip colors are not displayed.
+- **Layout.** Home-screen pages are Joy-Con pages (one L and one R, as before) followed by Pro Controller pages holding up to two Pro Controllers each; a single Pro Controller is centered. The miniature legend draws Pro Controller icons for those pages. The Pro Controller illustration is an original simplified drawing in `joycon_art.hpp`.
+- **Emulation caveat.** Third-party controllers that fully emulate the Pro Controller protocol report type `03` and cannot be distinguished from genuine controllers. MissionControl-emulated controllers appear as FullKey pads; JoyOff writes to `btdrv` directly, so those devices are expected to receive raw Switch output reports and not acknowledge Device Info. This has not been hardware-tested.
 
 ## TXT diagnostics
 
@@ -55,9 +66,9 @@ Requires devkitPro/devkitA64, libnx, deko3d, GLM headers, and `uam`. The NanoVG/
 make
 ```
 
-Outputs `JoyOff.nro` and `JoyOff-1.5.0.zip`, containing only `switch/JoyOff.nro`. `JoyOff-1.5.0-source.zip` contains the corresponding buildable application and renderer sources with license notices.
+Outputs `JoyOff.nro` and `JoyOff-1.6.0.zip`, containing only `switch/JoyOff.nro`. `JoyOff-1.6.0-source.zip` contains the corresponding buildable application and renderer sources with license notices.
 
-The initial development build succeeded with devkitPro's `devkita64:20260219` Docker image. Compiler warnings occur in the bundled GLM/STB/fontstash renderer dependencies. Basic shutdown and the graphical interface have been tested on hardware during development. Device Info timeout recovery has also been observed in the hardware log. The five-second disconnect observation window and final release UI still require hardware validation.
+The initial development build succeeded with devkitPro's `devkita64:20260219` Docker image. Compiler warnings occur in the bundled GLM/STB/fontstash renderer dependencies. Basic shutdown and the graphical interface have been tested on hardware during development. Device Info timeout recovery has also been observed in the hardware log. The five-second disconnect observation window and final release UI still require hardware validation. Pro Controller turn-off (alone and in a mixed run with Joy-Cons) and USB wake/re-pairing were verified on hardware with 1.6.0, built with the same image. Newer libnx (after 2026-10-01) renamed `BtmConnectedDeviceV13`, so building with a newer image needs that rename applied.
 
 ## Credits and license
 

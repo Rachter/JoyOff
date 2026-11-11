@@ -1,14 +1,14 @@
-# JoyOff 1.5.0
+# JoyOff 1.6.0
 
-A simple Nintendo Switch homebrew app that puts original Joy-Con controllers into shipment low-power mode and disconnects them, ready for long-term shelf storage. It also changes, backs up, and restores Joy-Con body and button colors. No PC required.
+A simple Nintendo Switch homebrew app that puts original Joy-Con and Pro Controllers into shipment low-power mode and disconnects them, ready for long-term shelf storage. It also changes, backs up, and restores Joy-Con body and button colors. No PC required.
 
 ![JoyOff on Nintendo Switch](assets/joyoff-screenshot.jpg)
 
 ## Features
 
-- Automatic detection of connected wireless Joy-Con L/R controllers.
+- Automatic detection of connected wireless Joy-Con L/R controllers and Pro Controllers.
 - Individual controller colors, connection states, and operation results.
-- Multiple controller pages with a miniature Joy-Con legend, L/R navigation, and touch swipes.
+- Multiple controller pages with a miniature controller legend, L/R navigation, and touch swipes. Pro Controllers get their own pages after the Joy-Con pages.
 - Turn off all ready controllers across every page with one confirmation.
 - Change body and button colors with touch RGB sliders and a live Joy-Con preview.
 - Advanced RGB controls with +/- buttons and numeric keyboard input (0-255).
@@ -20,19 +20,19 @@ A simple Nintendo Switch homebrew app that puts original Joy-Con controllers int
 ## Requirements
 
 - A Nintendo Switch running custom firmware and firmware 13.0.0 or newer.
-- Original Joy-Con L/R controllers connected wirelessly.
+- Original Joy-Con L/R controllers or Pro Controllers connected wirelessly.
 - Homebrew Menu in full application mode (title override).
 
-MissionControl is not required. Pro Controllers, Joy-Con 2, and third-party controllers are outside the scope of this app.
+MissionControl is not required. Joy-Con 2, Switch 2 Pro Controllers, NSO controllers (NES/SNES/N64/Genesis), and third-party controllers are outside the scope of this app.
 
 ## Usage
 
 1. Extract the release ZIP to the SD card root (it contains only `switch/JoyOff.nro`) and launch JoyOff through the Homebrew Menu.
-2. Detach your Joy-Cons and connect them wirelessly. Detection refreshes automatically.
+2. Detach your Joy-Cons and connect them wirelessly. Connect Pro Controllers over Bluetooth with the USB cable unplugged (or with *Pro Controller Wired Communication* off). Detection refreshes automatically.
 3. Press **Minus (-)** or tap **Turn Off All**, then confirm.
 4. Check the per-controller results. Use the touchscreen to exit after the controllers disconnect.
 
-**Saved Bluetooth pairing will be cleared.** JoyOff resets pairing, enables shipment low-power mode, and disconnects the controllers. Attach them to a Switch to wake and pair again. If an operation fails partway through, pairing may already have been cleared; check each controller's result.
+**Saved Bluetooth pairing will be cleared.** JoyOff resets pairing, enables shipment low-power mode, and disconnects the controllers. Attach Joy-Cons to a Switch, or connect Pro Controllers to a Switch or dock with a USB cable, to wake and pair again. Button presses do not wake a controller in shipment mode. If an operation fails partway through, pairing may already have been cleared; check each controller's result.
 
 Home screen controls:
 
@@ -48,7 +48,15 @@ Home screen controls:
 | L / R | Previous / next controller page |
 | Touch | Buttons, miniature page legend, and horizontal page swipes |
 
-Controller pages group left and right devices for display; they do not establish controller pairs. Colors come from stored HID color information and may differ from replacement shells.
+Controller pages group left and right devices for display; they do not establish controller pairs. Pro Controllers are shown two per page (a single one is centered). Colors come from stored HID color information and may differ from replacement shells.
+
+## Pro Controllers
+
+Pro Controllers use the same command sequence as Joy-Cons: Device Info (`02`), pairing reset (`07`), shipment low power (`08 01`), and disconnect (`06 00`). A controller is only offered for Turn Off when HID reports it as a full-key controller with an active Pro Controller (FullKey) input state **and** its Device Info reply reports type `03` (Pro Controller). JoyOff waits 100 ms after each acknowledgement before sending the next Pro Controller command, following [joycon-turnoff](https://github.com/Sopsy/joycon-turnoff)'s observation that Pro Controllers drop commands sent too quickly.
+
+A Pro Controller connected by USB with *Pro Controller Wired Communication* enabled is shown as "Unplug USB first" and is never sent commands. Pro Controller colors are shown, but color editing, backup, and restore remain Joy-Con only. Third-party controllers that fully emulate a Pro Controller, and controllers emulated by MissionControl, cannot be reliably distinguished from genuine ones; only use Turn Off with original Nintendo controllers.
+
+Tested on hardware with 1.6.0: an original Pro Controller turns off on its own and together with Joy-Cons in one Turn Off All, and wakes and pairs again when connected to the Switch by USB.
 
 TXT logging is off at each launch. Open Diagnostics, press Minus or tap the logging toggle to enable it, then use X / Refresh to capture discovery. Disabling logging leaves existing log files intact.
 
@@ -87,7 +95,7 @@ Requires devkitPro/devkitA64, libnx, deko3d, GLM headers, and `uam`. The NanoVG/
 make -j4 release
 ```
 
-The output includes `JoyOff.nro`, `JoyOff-1.5.0.zip` containing only `switch/JoyOff.nro`, and `JoyOff-1.5.0-source.zip` with the corresponding sources and license notices. See the [technical README](docs/technical.md) for implementation details and diagnostic information.
+The output includes `JoyOff.nro`, `JoyOff-1.6.0.zip` containing only `switch/JoyOff.nro`, and `JoyOff-1.6.0-source.zip` with the corresponding sources and license notices. See the [technical README](docs/technical.md) for implementation details and diagnostic information.
 
 ## Credits and license
 
@@ -95,7 +103,7 @@ The Switch application is distributed under [LGPLv3](COPYING), with the accompan
 
 Joy-Con illustrations are adapted from [0 Noctis 0's Wikimedia illustration](https://commons.wikimedia.org/wiki/File:Nintendo_Switch_Joy-Con_illustration.svg), licensed CC BY-SA 4.0. See [art attribution](COPYING.ART).
 
-Protocol and implementation references include [jc_toolkit](https://github.com/CTCaer/jc_toolkit), [dekuNukem's reverse-engineering notes](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering), [libnx](https://github.com/switchbrew/libnx), and [MissionControl](https://github.com/ndeadly/MissionControl).
+Protocol and implementation references include [jc_toolkit](https://github.com/CTCaer/jc_toolkit), [joycon-turnoff](https://github.com/Sopsy/joycon-turnoff) (Pro Controller command pacing), [dekuNukem's reverse-engineering notes](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering), [libnx](https://github.com/switchbrew/libnx), and [MissionControl](https://github.com/ndeadly/MissionControl).
 
 The color SPI read/write implementation is adapted from CTCaer's jc_toolkit for JoyOff's Bluetooth transport. Its MIT notice is included in [COPYING.JCTOOLKIT](COPYING.JCTOOLKIT).
 
